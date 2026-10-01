@@ -216,18 +216,25 @@ td.act{width:1%; white-space:nowrap}
 /* ---------- NASTAVITVE: vpiši podatke svojega Supabase projekta ---------- */
 const SUPABASE_URL = "https://szvibldsdwkamcylrpmh.supabase.co";        // npr. https://abcdefgh.supabase.co
 const SUPABASE_KEY = "sb_publishable_4MLc8XrztYlYu9UtorIqHg_R52YmtFq";    // anon / publishable key (je javen, varnost zagotavljajo pravila v bazi)
+const TEAM_EMAIL   = "pcbs-ekipa@superior-engineering.si"; // skupni ekipni račun v Supabase (Authentication -> Users)
 
 const store = {
   sb: null, email: null, member: null,
   async init() {
-    if (!window.supabase || SUPABASE_URL.startsWith("VPISI")) { state.error = "Aplikacija še ni povezana s Supabase. V index.html vpiši SUPABASE_URL in SUPABASE_KEY."; return false; }
+    if (!window.supabase || SUPABASE_KEY.startsWith("VPISI")) { state.error = "Aplikacija še ni povezana s Supabase. V index.html vpiši SUPABASE_KEY."; return false; }
     this.sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
     const { data: { session } } = await this.sb.auth.getSession();
     if (!session) { renderLogin(); return "login"; }
     this.email = (session.user.email || "").toLowerCase();
     const { data } = await this.sb.from("clani").select("ime, lahko_ureja").eq("email", this.email).maybeSingle();
-    if (!data) { state.error = `E-mail ${this.email} ni na seznamu članov. Prosi skrbnika aplikacije, da te doda, nato osveži stran.`; renderSideFoot(); return false; }
+    if (!data) { state.error = "Ta račun nima dostopa do podatkov. Preveri, ali je ekipni račun vpisan v tabelo clani."; renderSideFoot(); return false; }
     this.member = data;
+    // kdo sedi za računalnikom: izbrano ime s seznama članov (shrani se v tem brskalniku)
+    const { data: list } = await this.sb.from("clani").select("ime").not("ime", "is", null).order("ime");
+    const imena = (list || []).map(r => r.ime).filter(Boolean);
+    let ime = null; try { ime = localStorage.getItem("se-pcbs-ime"); } catch {}
+    if (!ime || !imena.includes(ime)) { renderNamePicker(imena); return "login"; }
+    this.ime = ime;
     return true;
   },
   subscribe(col, cb, onErr) {
@@ -270,13 +277,9 @@ const store = {
   },
   imageUrl(id) { return this.sb.storage.from("slike").getPublicUrl(id).data.publicUrl; },
   async readImage(id) { const r = await fetch(this.imageUrl(id)); if (!r.ok) throw new Error(); return await r.blob(); },
-  async myId() { return this.email; },
+  async myId() { return this.ime || this.email; },
   async canWrite() { return !!(this.member && this.member.lahko_ureja); },
-  async names(ids) {
-    const { data } = await this.sb.from("clani").select("email, ime").in("email", ids);
-    const out = {}; ids.forEach(i => out[i] = { name: i }); (data || []).forEach(r => { if (r.ime) out[r.email] = { name: r.ime }; });
-    return out;
-  },
+  async names(ids) { const out = {}; ids.forEach(i => out[i] = { name: i }); return out; },
   canDownload() { return true; },
   async download(filename, text) {
     const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
@@ -284,27 +287,47 @@ const store = {
     setTimeout(() => URL.revokeObjectURL(url), 2000);
   },
   canLogout() { return true; },
-  logout() { return this.sb.auth.signOut(); },
+  logout() { try { localStorage.removeItem("se-pcbs-ime"); } catch {} return this.sb.auth.signOut(); },
 };
 
 function renderLogin() {
   $("#app").innerHTML = `<div class="blank" style="grid-column:1/-1">
     <h2>Superior Engineering PCBs</h2>
-    <p>Vpiši svoj e-mail. Poslali ti bomo povezavo za prijavo, gesla ne potrebuješ.</p>
-    <p><label for="lm" class="muted">E-mail</label><input class="in" id="lm" type="email" autocomplete="email" placeholder="ime.priimek@…"></p>
-    <p><button class="btn primary" id="lb">Pošlji povezavo za prijavo</button></p>
+    <p>Vpiši geslo ekipe. Dobiš ga pri vodji elektro ekipe.</p>
+    <p><label for="lp" class="muted">Geslo ekipe</label><input class="in" id="lp" type="password" autocomplete="current-password"></p>
+    <p><button class="btn primary" id="lb">Prijava</button></p>
     <p id="lmsg" class="muted" role="status"></p></div>`;
   const go = async () => {
-    const email = $("#lm").value.trim(), msg = $("#lmsg");
-    if (!email) { msg.textContent = "Vpiši e-mail."; return; }
-    $("#lb").disabled = true; msg.textContent = "Pošiljam …";
-    const { error } = await store.sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname } });
-    $("#lb").disabled = false;
-    msg.textContent = error ? (error.status === 429 ? "Preveč poskusov. Počakaj nekaj minut in poskusi znova." : "Pošiljanje ni uspelo: " + error.message)
-      : "Preveri e-pošto in klikni povezavo. Sporočilo lahko pride tudi v mapo neželene pošte.";
+    const password = $("#lp").value, msg = $("#lmsg");
+    if (!password) { msg.textContent = "Vpiši geslo."; return; }
+    $("#lb").disabled = true; msg.textContent = "Prijavljam …";
+    const { error } = await store.sb.auth.signInWithPassword({ email: TEAM_EMAIL, password });
+    if (error) { $("#lb").disabled = false; msg.textContent = error.status === 429 ? "Preveč poskusov. Počakaj nekaj minut." : "Napačno geslo."; return; }
+    location.reload();
   };
   $("#lb").addEventListener("click", go);
-  $("#lm").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  $("#lp").addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  $("#lp").focus();
+}
+
+function renderNamePicker(imena) {
+  $("#app").innerHTML = `<div class="blank" style="grid-column:1/-1">
+    <h2>Kdo si?</h2>
+    <p>Izberi svoje ime. Zapisalo se bo pri vsaki spremembi, ki jo shraniš. Ta brskalnik si ga bo zapomnil.</p>
+    ${imena.length
+      ? `<p><label for="ln" class="muted">Ime</label><select class="in" id="ln"><option value="">izberi …</option>${imena.map(i => `<option>${esc(i)}</option>`).join("")}</select></p>
+         <p><button class="btn primary" id="lb">Nadaljuj</button></p><p id="lmsg" class="muted" role="status"></p>
+         <p class="muted">Tvojega imena ni na seznamu? Prosi vodjo elektro ekipe, da te doda.</p>`
+      : `<p class="muted">Seznam članov je prazen. V Supabase v tabelo clani dodaj člane z imeni.</p>`}
+    <p><button class="linkbtn" id="lo">Odjava</button></p></div>`;
+  $("#lo").addEventListener("click", async () => { await store.logout(); location.reload(); });
+  if (!imena.length) return;
+  $("#lb").addEventListener("click", () => {
+    const v = $("#ln").value;
+    if (!v) { $("#lmsg").textContent = "Izberi svoje ime."; return; }
+    try { localStorage.setItem("se-pcbs-ime", v); } catch {}
+    location.reload();
+  });
 }
 
 /* ===================================================================== */
@@ -714,7 +737,7 @@ const HELP = [
   ["Iskanje", `<p>Iskalnik levo zgoraj išče po zadnji reviziji vseh vezij. Vpiši npr. <b>0x100</b>, <b>CAN_H</b> ali <b>Micro-Fit</b> in videl boš, katero vezje ga vsebuje in v katerem zavihku.</p>`],
   ["Slike", `<p>V zavihku Konektorji in pinout lahko v načinu urejanja naložiš fotografijo vezja z označenimi konektorji (PNG ali JPG, največ 20 MB). Slika se shrani skupaj z revizijo.</p>`],
   ["Varnostna kopija", `<p>Gumb <b>Izvozi vse</b> shrani vsa vezja, revizije in slike v datoteko JSON. Naredi kopijo vsaj ob koncu sezone. Z gumbom <b>Uvozi</b> jo lahko naložiš nazaj.</p>`],
-  ["Pravice", `<p>Prijaviš se lahko samo z e-mailom, ki je na seznamu članov (tabela <b>clani</b> v Supabase). Skrbnik pri vsakem članu določi, ali lahko ureja. Kdor ne more urejati, vidi podatke, gumbov za urejanje pa ne.</p>`],
+  ["Pravice", `<p>Za prijavo je potrebno geslo ekipe, nato vsak izbere svoje ime s seznama. Ime se zapiše pri vsaki spremembi. Novega člana na seznam doda vodja elektro ekipe v Supabase (tabela <b>clani</b>). Gesla ne deli izven ekipe.</p>`],
 ];
 async function openHelp() {
   const wrap = document.createElement("div");
